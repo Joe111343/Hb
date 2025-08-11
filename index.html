@@ -3,33 +3,74 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>3D 第一人稱多人語音遊戲（含跳躍＋顏色改良）</title>
+<title>3D 多人遊戲 + Loading 影片</title>
 <style>
-  body { margin:0; overflow:hidden; background:#111; cursor: crosshair; }
+  body, html {
+    margin: 0; padding: 0; height: 100%; background: black; overflow: hidden;
+  }
+  #container {
+    width: 100vw; height: 100vh;
+  }
+  video#loadingVideo {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    max-width: 100vw;
+    max-height: 100vh;
+    background: black;
+    cursor: pointer;
+    z-index: 9999;
+    display: none;
+  }
   #info {
-    position: fixed; top: 8px; left: 8px; z-index:10;
+    position: fixed; top: 8px; left: 8px; z-index: 10000;
     background: rgba(0,0,0,0.5); color: #ddd; padding: 6px 12px;
     font-family: monospace; font-size: 13px; border-radius: 6px;
     user-select:none;
+    pointer-events:none;
   }
 </style>
 </head>
 <body>
-<div id="info">點擊畫面啟動麥克風與鎖定滑鼠，WASD / 手柄左搖桿移動，空白鍵跳躍</div>
+
+<div id="container"></div>
+<div id="info">WASD / 手柄左搖桿移動，空白鍵跳躍，滑鼠點擊鎖定視角</div>
+<video id="loadingVideo" src="loading.mp4" preload="auto"></video>
 
 <script type="module">
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.153.0/build/three.module.js';
 import Peer from 'https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.es.min.js';
 
-const ROOM_ID = 'R3D_FP_MULTIPLAYER_AUDIO_ESM';
-let peer, myId, stream = null;
-const conns = {};
-const calls = {};
-const players = {};
+const container = document.getElementById('container');
+const loadingVideo = document.getElementById('loadingVideo');
 
+let gameStarted = false; // 控制是否開始遊戲
+
+// 影片播放控制
+function startGame() {
+  loadingVideo.style.display = 'none';
+  gameStarted = true;
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+  animate();
+}
+
+function playLoadingVideo() {
+  loadingVideo.style.display = 'block';
+  loadingVideo.play().catch(e => console.warn('影片播放失敗', e));
+  loadingVideo.onended = startGame;
+  loadingVideo.onclick = () => {
+    loadingVideo.pause();
+    startGame();
+  }
+  document.removeEventListener('click', playLoadingVideo);
+}
+
+document.addEventListener('click', playLoadingVideo);
+
+// THREE 基本設置
 const scene = new THREE.Scene();
 
-// 背景漸層色
+// 背景漸層
 const canvasBG = document.createElement('canvas');
 canvasBG.width = 1; canvasBG.height = 256;
 const ctx = canvasBG.getContext('2d');
@@ -44,9 +85,9 @@ scene.background = bgTexture;
 const cam = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 2000);
 const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
+container.appendChild(renderer.domElement);
 
-// 燈光調整
+// 光源
 const dirLight = new THREE.DirectionalLight(0xffffff, 2);
 dirLight.position.set(30, 50, 30);
 dirLight.castShadow = true;
@@ -56,9 +97,11 @@ scene.add(ambientLight);
 
 scene.add(new THREE.GridHelper(400, 40));
 
+// 音訊相關
 const audioCtx = new AudioContext();
 const listener = audioCtx.listener;
 
+// 玩家資料
 function getBrightColor() {
   const h = Math.random();
   const s = 1;
@@ -90,8 +133,9 @@ window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
 let yaw = 0, pitch = 0;
 const maxPitch = Math.PI/2 - 0.01;
+
 function onMouseMove(e) {
-  if(document.pointerLockElement === renderer.domElement) {
+  if(document.pointerLockElement === renderer.domElement && gameStarted) {
     const sensitivity = 0.0025;
     yaw -= e.movementX * sensitivity;
     pitch -= e.movementY * sensitivity;
@@ -99,10 +143,197 @@ function onMouseMove(e) {
   }
 }
 renderer.domElement.addEventListener('click', () => {
-  if(!stream) {
-    navigator.mediaDevices.getUserMedia({audio:true}).then(s => {
-      stream = s;
-      listener.positionX.setValueAtTime(myPos.x, audioCtx.currentTime);
+  if(gameStarted && document.pointerLockElement !== renderer.domElement) {
+    renderer.domElement.requestPointerLock();
+  }
+});
+window.addEventListener('mousemove', onMouseMove);
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  cam.aspect = window.innerWidth / window.innerHeight;
+  cam.updateProjectionMatrix();
+});
+
+// 建立玩家模型
+function createPlayerMesh(color) {
+  const geometry = new THREE.BoxGeometry(12, 24, 12);
+  const material = new THREE.MeshStandardMaterial({color});
+  const mesh = new THREE.Mesh(geometry, material);
+  const edges = new THREE.EdgesGeometry(geometry);
+  const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({color:0xffffff}));
+  mesh.add(line);
+  return mesh;
+}
+
+// PeerJS 多人連線設定
+const ROOM_ID = 'R3D_FP_MULTIPLAYER_AUDIO_ESM';
+let peer, myId, stream = null;
+const conns = {};
+const calls = {};
+const players = {};
+
+function makePeer(id) {
+  return new Peer(id, {host:'0.peerjs.com', port:443, path:'/'});
+}
+
+function setupPeerEvents() {
+  peer.on('connection', conn => setupConn(conn));
+  peer.on('call', call => {
+    call.answer(stream);
+    call.on('stream', s => attachAudio(call.peer, s));
+  });
+}
+
+function connectToRoom() {
+  peer = makePeer();
+  peer.on('open', id => {
+    myId = id;
+    console.log('My ID:', id);
+    const c = peer.connect(ROOM_ID);
+    let timeout = setTimeout(() => {
+      peer.destroy();
+      peer = makePeer(ROOM_ID);
+      setupPeerEvents();
+      console.log('成為房主:', ROOM_ID);
+    }, 1000);
+    c.on('open', () => {
+      clearTimeout(timeout);
+      setupConn(c);
+      console.log('已連到房主:', ROOM_ID);
+    });
+    c.on('error', () => {});
+  });
+  setupPeerEvents();
+}
+
+function setupConn(conn) {
+  conns[conn.peer] = conn;
+  conn.on('open', () => {
+    conn.send({type:'intro', id:myId});
+    if(stream && !calls[conn.peer]) {
+      const call = peer.call(conn.peer, stream);
+      call.on('stream', s => attachAudio(conn.peer, s));
+      calls[conn.peer] = call;
+    }
+  });
+  conn.on('data', data => {
+    if(data.type === 'intro') {
+      conn.send({type:'introAck', id:myId, color:myColor, pos:[myPos.x,myPos.y,myPos.z]});
+    } else if(data.type === 'introAck') {
+      addPlayer(data.id, data.color, data.pos);
+    } else if(data.type === 'state') {
+      if(players[data.id]) players[data.id].pos.fromArray(data.pos);
+    }
+  });
+  conn.on('close', () => {
+    removePlayer(conn.peer);
+    delete conns[conn.peer];
+    if(calls[conn.peer]) {
+      calls[conn.peer].close();
+      delete calls[conn.peer];
+    }
+  });
+}
+
+function addPlayer(id, color, posArr) {
+  if(!players[id]) {
+    players[id] = {mesh:createPlayerMesh(color||0x888888), pos:new THREE.Vector3()};
+    scene.add(players[id].mesh);
+    if(posArr) players[id].pos.fromArray(posArr);
+  }
+}
+function removePlayer(id) {
+  if(players[id]) {
+    scene.remove(players[id].mesh);
+    if(players[id].panner) players[id].panner.disconnect();
+    delete players[id];
+  }
+}
+
+function attachAudio(peerId, stream) {
+  const src = audioCtx.createMediaStreamSource(stream);
+  const panner = audioCtx.createPanner();
+  panner.panningModel = 'HRTF';
+  panner.distanceModel = 'linear';
+  panner.refDistance = 20;
+  panner.maxDistance = 1000;
+  panner.rolloffFactor = 1;
+  src.connect(panner).connect(audioCtx.destination);
+  players[peerId] = players[peerId]||{};
+  players[peerId].panner = panner;
+  if(players[peerId] && players[peerId].pos) {
+    panner.positionX.setValueAtTime(players[peerId].pos.x, audioCtx.currentTime);
+    panner.positionY.setValueAtTime(players[peerId].pos.y + headHeight, audioCtx.currentTime);
+    panner.positionZ.setValueAtTime(players[peerId].pos.z, audioCtx.currentTime);
+  }
+}
+
+// 狀態廣播
+function broadcastState() {
+  const posArr = [myPos.x, myPos.y, myPos.z];
+  for(const id in conns) {
+    try { conns[id].send({type:'state', id:myId, pos:posArr}); } catch {}
+  }
+}
+
+// 移動與跳躍控制
+let velocityY = 0;
+const gravity = -0.98;
+const jumpPower = 15;
+let onGround = false;
+
+function handleGamepad() {
+  const gps = navigator.getGamepads();
+  if(!gps) return;
+  const gp = gps[0];
+  if(gp) {
+    const forward = new THREE.Vector3(0,0,-1);
+    const right = new THREE.Vector3(1,0,0);
+    forward.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+    right.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+    const speed = 2;
+    myPos.add(forward.clone().multiplyScalar(-gp.axes[1]*speed));
+    myPos.add(right.clone().multiplyScalar(gp.axes[0]*speed));
+  }
+}
+
+function updateMovement() {
+  const forward = new THREE.Vector3(0,0,-1);
+  const right = new THREE.Vector3(1,0,0);
+  forward.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+  right.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+  const speed = 2;
+
+  if(keys['w']) myPos.add(forward.clone().multiplyScalar(speed));
+  if(keys['s']) myPos.add(forward.clone().multiplyScalar(-speed));
+  if(keys['a']) myPos.add(right.clone().multiplyScalar(-speed));
+  if(keys['d']) myPos.add(right.clone().multiplyScalar(speed));
+
+  handleGamepad();
+
+  if(onGround && keys[' ']) {
+    velocityY = jumpPower;
+    onGround = false;
+  }
+
+  velocityY += gravity * 0.1;
+  myPos.y += velocityY * 0.1;
+
+  if(myPos.y <= 0) {
+    myPos.y = 0;
+    velocityY = 0;
+    onGround = true;
+  }
+}
+
+// 主動畫迴圈
+function animate() {
+  if(!gameStarted) return; // 影片沒播完不更新
+
+  updateMovement();
+
+  cam.position.set(myPos.x, myPos.y + headHeight, myPos.z);
+  const euler = new THREE.Euler(pitch, yaw,      listener.positionX.setValueAtTime(myPos.x, audioCtx.currentTime);
       listener.positionY.setValueAtTime(myPos.y + headHeight, audioCtx.currentTime);
       listener.positionZ.setValueAtTime(myPos.z, audioCtx.currentTime);
     }).catch(e => console.warn('麥克風權限被拒或錯誤:', e));
