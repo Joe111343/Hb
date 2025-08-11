@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>多人即時同步遊戲（含語音）</title>
+<style>
+  body { margin:0; overflow:hidden; background:#222; color:#fff; font-family:Arial; }
+  canvas { background:#444; display:block; }
+  #ui { position:fixed; left:10px; top:10px; z-index:100; }
+  .player-audio { display:flex; gap:8px; align-items:center; margin-top:6px; }
+  .btn { padding:6px 10px; background:#666; color:#fff; border-radius:6px; cursor:pointer; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div>
+    <button id="btnToggleMic" class="btn">啟用麥克風</button>
+    <button id="btnMuteAll" class="btn">全部靜音</button>
+  </div>
+  <div id="audios"></div>
+  <div style="margin-top:8px; font-size:12px; opacity:0.8">你的ID: <span id="myId">...</span></div>
+</div>
+
+<canvas id="game"></canvas>
+
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+// 遊戲狀態
+let players = {};
+let myId = null;
+let myColor = '#' + Math.floor(Math.random()*16777215).toString(16);
+let myPos = { x: Math.random()*canvas.width, y: Math.random()*canvas.height };
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key] = true);
+window.addEventListener("keyup", e => keys[e.key] = false);
+
+// PeerJS & 連線列表
+const peer = new Peer(null, { host: '0.peerjs.com', port: 443, path: '/' });
+let conns = [];          // data connections
+let mediaCalls = {};     // 保存 call 物件 keyed by peerId
+let audioElements = {};  // 保存 <audio> keyed by peerId
+
+// 音訊
+let localStream = null;
+let micEnabled = false;
+let allMuted = false;
+
+// UI 元件
+const btnToggleMic = document.getElementById('btnToggleMic');
+const btnMuteAll = document.getElementById('btnMuteAll');
+const audiosDiv = document.getElementById('audios');
+const myIdSpan = document.getElementById('myId');
+
+btnToggleMic.onclick = async () => {
+  if (!micEnabled) {
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micEnabled = true;
+      btnToggleMic.textContent = '關閉麥克風';
+      // 對每個已連線的 peer 發起 call（傳送自己的 stream）
+      conns.forEach(c => {
+        if (!mediaCalls[c.peer]) {
+          const call = peer.call(c.peer, localStream);
+          setupCallHandlers(call);
+          mediaCalls[c.peer] = call;
+        }
+      });
+    } catch (e) {
+      alert('取得麥克風失敗：' + e.message);
+    }
+  } else {
+    // 停用麥克風：停止軌道並關閉發起的 call
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+    for (let pid in mediaCalls) {
+      try { mediaCalls[pid].close(); } catch(e){}
+      delete mediaCalls[pid];
+    }
+    micEnabled = false;
+    btnToggleMic.textContent = '啟用麥克風';
+  }
+};
+
+btnMuteAll.onclick = () => {
+  allMuted = !allMuted;
+  btnMuteAll.textContent = allMuted ? '取消全部靜音' : '全部靜音';
+  for (const aid in audioElements) {
+    audioElements[aid].muted = allMuted;
+  }
+};
+
+// 當有來電（他人呼叫你的音訊）
+peer.on('call', call => {
+  // 若你沒開麥，仍可接收音訊並播放（答覆 null 或空 stream 會被某些瀏覽器拒絕）
+  // 最健全的方式是若 localStream 存在就 answer(localStream)，否則建立一個 silent track（或先 prompt 使用者）
+  const answerWith = localStream;
+  if (answerWith) {
+    call.answer(answerWith);
+  } else {
+    // 若沒本地麥克風，嘗試 answer(empty stream) 會出錯，這裡直接 answer() 可能被拒
+    try { call.answer(); } catch(e){}
+  }
+  setupCallHandlers(call);
+});
+
+// 處理音訊 call events
+function setupCallHandlers(call) {
+  call.on('stream', remoteStream => {
+    const pid = call.peer;
+    attachRemoteAudio(pid, remoteStream);
+  });
+  call.on('close', () => {
+    removeRemoteAudio(call.peer);
+    delete mediaCalls[call.peer];
+  });
+  call.on('error', () => {
+    removeRemoteAudio(call.peer);
+    delete mediaCalls[call.peer];
+  });
+  mediaCalls[call.peer] = call;
+}
+
+// 建立或更新音訊 DOM
+function attachRemoteAudio(peerId, stream) {
+  if (audioElements[peerId]) {
+    // 更新 srcObject
+    audioElements[peerId].srcObject = stream;
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'player-audio';
+  const label = document.createElement('div');
+  label.textContent = peerId;
+  label.style.fontSize = '12px';
+  const audio = document.createElement('audio');
+  audio.autoplay = true;
+  audio.controls = false;
+  audio.srcObject = stream;
+  audio.muted = allMuted; // respect global mute
+  audioElements[peerId] = audio;
+
+  const btnMute = document.createElement('button');
+  btnMute.className = 'btn';
+  btnMute.textContent = '靜音';
+  btnMute.onclick = () => {
+    audio.muted = !audio.muted;
+    btnMute.textContent = audio.muted ? '取消靜音' : '靜音';
+  };
+
+  wrap.appendChild(label);
+  wrap.appendChild(audio);
+  wrap.appendChild(btnMute);
+  audiosDiv.appendChild(wrap);
+}
+
+function removeRemoteAudio(peerId) {
+  if (!audioElements[peerId]) return;
+  // 找到 wrapper 並移除
+  const nodes = Array.from(audiosDiv.children);
+  nodes.forEach(n => {
+    if (n.firstChild && n.firstChild.textContent === peerId) audiosDiv.removeChild(n);
+  });
+  delete audioElements[peerId];
+}
+
+// PeerJS data connection handling
+peer.on('open', id => {
+  myId = id;
+  myIdSpan.textContent = id;
+  players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+  console.log("我的ID:", id);
+
+  const otherId = prompt("輸入要連的玩家ID（留空為等待其他人加入）");
+  if (otherId) connectTo(otherId);
+});
+
+peer.on('connection', conn => {
+  setupConnection(conn);
+});
+
+function connectTo(id) {
+  const conn = peer.connect(id);
+  setupConnection(conn);
+}
+
+function setupConnection(conn) {
+  conn.on('open', () => {
+    conns.push(conn);
+    // 如有本地音訊，對方要建立 media call
+    if (localStream && !mediaCalls[conn.peer]) {
+      const call = peer.call(conn.peer, localStream);
+      setupCallHandlers(call);
+    }
+    // 傳送自己的狀態
+    conn.send({ type: "join", id: myId, x: myPos.x, y: myPos.y, color: myColor });
+  });
+  conn.on('data', data => {
+    if (data.type === "join") {
+      players[data.id] = { x: data.x, y: data.y, color: data.color };
+    } else if (data.type === "move") {
+      if (players[data.id]) {
+        players[data.id].x = data.x;
+        players[data.id].y = data.y;
+      }
+    }
+  });
+  conn.on('close', () => {
+    // 移除連線與音訊元素
+    conns = conns.filter(c => c !== conn);
+    removeRemoteAudio(conn.peer);
+    if (players[conn.peer]) delete players[conn.peer];
+  });
+  conn.on('error', err => {
+    console.warn('conn error', err);
+  });
+}
+
+// 遊戲循環（移動 + 同步）
+function gameLoop() {
+  const speed = 3;
+  if (keys['w'] || keys['ArrowUp']) myPos.y -= speed;
+  if (keys['s'] || keys['ArrowDown']) myPos.y += speed;
+  if (keys['a'] || keys['ArrowLeft']) myPos.x -= speed;
+  if (keys['d'] || keys['ArrowRight']) myPos.x += speed;
+  players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+
+  // 傳送位置
+  conns.forEach(c => {
+    try { c.send({ type: "move", id: myId, x: myPos.x, y: myPos.y }); } catch(e){}
+  });
+
+  // 畫面
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let id in players) {
+    ctx.fillStyle = players[id].color;
+    ctx.beginPath();
+    ctx.arc(players[id].x, players[id].y, 20, 0, Math.PI*2);
+    ctx.fill();
+    // 標 ID（小字）
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px Arial';
+    ctx.fillText(id === myId ? '你' : id, players[id].x - 12, players[id].y - 28);
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+gameLoop();
+
+// 畫面縮放處理
+window.addEventListener('resize', () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+</script>
+</body>
+</html>
