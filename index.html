@@ -332,218 +332,53 @@ function animate() {
 
   updateMovement();
 
-  cam.position.set(myPos.x, myPos.y + headHeight, myPos.z);
-  const euler = new THREE.Euler(pitch, yaw,      listener.positionX.setValueAtTime(myPos.x, audioCtx.currentTime);
-      listener.positionY.setValueAtTime(myPos.y + headHeight, audioCtx.currentTime);
-      listener.positionZ.setValueAtTime(myPos.z, audioCtx.currentTime);
-    }).catch(e => console.warn('麥克風權限被拒或錯誤:', e));
-  }
-  if(document.pointerLockElement !== renderer.domElement) {
-    renderer.domElement.requestPointerLock();
-  }
-});
-window.addEventListener('mousemove', onMouseMove);
-window.addEventListener('resize', () => {
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  cam.aspect = window.innerWidth / window.innerHeight;
-  cam.updateProjectionMatrix();
-});
-
-function createPlayerMesh(color) {
-  const geometry = new THREE.BoxGeometry(12, 24, 12);
-  const material = new THREE.MeshStandardMaterial({color});
-  const mesh = new THREE.Mesh(geometry, material);
-  const edges = new THREE.EdgesGeometry(geometry);
-  const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({color:0xffffff}));
-  mesh.add(line);
-  return mesh;
-}
-
-function makePeer(id) {
-  return new Peer(id, {host:'0.peerjs.com', port:443, path:'/'});
-}
-
-function setupPeerEvents() {
-  peer.on('connection', conn => setupConn(conn));
-  peer.on('call', call => {
-    call.answer(stream);
-    call.on('stream', s => attachAudio(call.peer, s));
-  });
-}
-
-function connectToRoom() {
-  peer = makePeer();
-  peer.on('open', id => {
-    myId = id;
-    console.log('My ID:', id);
-    const c = peer.connect(ROOM_ID);
-    let timeout = setTimeout(() => {
-      peer.destroy();
-      peer = makePeer(ROOM_ID);
-      setupPeerEvents();
-      console.log('成為房主:', ROOM_ID);
-    }, 1000);
-    c.on('open', () => {
-      clearTimeout(timeout);
-      setupConn(c);
-      console.log('已連到房主:', ROOM_ID);
-    });
-    c.on('error', () => {});
-  });
-  setupPeerEvents();
-}
-
-function setupConn(conn) {
-  conns[conn.peer] = conn;
-  conn.on('open', () => {
-    conn.send({type:'intro', id:myId});
-    if(stream && !calls[conn.peer]) {
-      const call = peer.call(conn.peer, stream);
-      call.on('stream', s => attachAudio(conn.peer, s));
-      calls[conn.peer] = call;
-    }
-  });
-  conn.on('data', data => {
-    if(data.type === 'intro') {
-      conn.send({type:'introAck', id:myId, color:myColor, pos:[myPos.x,myPos.y,myPos.z]});
-    } else if(data.type === 'introAck') {
-      addPlayer(data.id, data.color, data.pos);
-    } else if(data.type === 'state') {
-      if(players[data.id]) players[data.id].pos.fromArray(data.pos);
-    }
-  });
-  conn.on('close', () => {
-    removePlayer(conn.peer);
-    delete conns[conn.peer];
-    if(calls[conn.peer]) {
-      calls[conn.peer].close();
-      delete calls[conn.peer];
-    }
-  });
-}
-
-function addPlayer(id, color, posArr) {
-  if(!players[id]) {
-    players[id] = {mesh:createPlayerMesh(color||0x888888), pos:new THREE.Vector3()};
-    scene.add(players[id].mesh);
-    if(posArr) players[id].pos.fromArray(posArr);
-  }
-}
-function removePlayer(id) {
-  if(players[id]) {
-    scene.remove(players[id].mesh);
-    if(players[id].panner) players[id].panner.disconnect();
-    delete players[id];
-  }
-}
-
-function attachAudio(peerId, stream) {
-  const src = audioCtx.createMediaStreamSource(stream);
-  const panner = audioCtx.createPanner();
-  panner.panningModel = 'HRTF';
-  panner.distanceModel = 'linear';
-  panner.refDistance = 20;
-  panner.maxDistance = 1000;
-  panner.rolloffFactor = 1;
-  src.connect(panner).connect(audioCtx.destination);
-  players[peerId] = players[peerId]||{};
-  players[peerId].panner = panner;
-  if(players[peerId] && players[peerId].pos) {
-    panner.positionX.setValueAtTime(players[peerId].pos.x, audioCtx.currentTime);
-    panner.positionY.setValueAtTime(players[peerId].pos.y + headHeight, audioCtx.currentTime);
-    panner.positionZ.setValueAtTime(players[peerId].pos.z, audioCtx.currentTime);
-  }
-}
-
-function broadcastState() {
-  const posArr = [myPos.x, myPos.y, myPos.z];
-  for(const id in conns) {
-    try { conns[id].send({type:'state', id:myId, pos:posArr}); } catch {}
-  }
-}
-
-let velocityY = 0;
-const gravity = -0.98;
-const jumpPower = 15;
-let onGround = false;
-
-function handleGamepad() {
-  const gps = navigator.getGamepads();
-  if(!gps) return;
-  const gp = gps[0];
-  if(gp) {
-    const forward = new THREE.Vector3(0,0,-1);
-    const right = new THREE.Vector3(1,0,0);
-    forward.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
-    right.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
-    const speed = 2;
-    myPos.add(forward.clone().multiplyScalar(-gp.axes[1]*speed));
-    myPos.add(right.clone().multiplyScalar(gp.axes[0]*speed));
-  }
-}
-
-function updateMovement() {
-  const forward = new THREE.Vector3(0,0,-1);
-  const right = new THREE.Vector3(1,0,0);
-  forward.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
-  right.applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
-  const speed = 2;
-
-  if(keys['w']) myPos.add(forward.clone().multiplyScalar(speed));
-  if(keys['s']) myPos.add(forward.clone().multiplyScalar(-speed));
-  if(keys['a']) myPos.add(right.clone().multiplyScalar(-speed));
-  if(keys['d']) myPos.add(right.clone().multiplyScalar(speed));
-
-  handleGamepad();
-
-  if(onGround && keys[' ']) {
-    velocityY = jumpPower;
-    onGround = false;
-  }
-
-  velocityY += gravity * 0.1;
-  myPos.y += velocityY * 0.1;
-
-  if(myPos.y <= 0) {
-    myPos.y = 0;
-    velocityY = 0;
-    onGround = true;
-  }
-}
-
-function animate() {
-  updateMovement();
-
-  cam.position.set(myPos.x, myPos.y + headHeight, myPos.z);
+cam.position.set(myPos.x, myPos.y + headHeight, myPos.z);
   const euler = new THREE.Euler(pitch, yaw, 0, 'YXZ');
   cam.quaternion.setFromEuler(euler);
 
-  if(!players[myId]) addPlayer(myId, myColor, [myPos.x,myPos.y,myPos.z]);
-  players[myId].pos.copy(myPos);
-  players[myId].mesh.position.set(myPos.x, myPos.y + 12, myPos.z);
-
-  for(const id in players) {
-    if(id !== myId) {
-      players[id].mesh.position.lerp(players[id].pos.clone().add(new THREE.Vector3(0,12,0)), 0.2);
-      if(players[id].panner) {
-        players[id].panner.positionX.setValueAtTime(players[id].pos.x, audioCtx.currentTime);
-        players[id].panner.positionY.setValueAtTime(players[id].pos.y + headHeight, audioCtx.currentTime);
-        players[id].panner.positionZ.setValueAtTime(players[id].pos.z, audioCtx.currentTime);
+  // 更新其他玩家位置與模型
+  for (const id in players) {
+    if (id === myId) continue;
+    const p = players[id];
+    if (p.pos) {
+      p.mesh.position.copy(p.pos);
+      p.mesh.position.y += 12; // 玩家高度中心點調整
+      p.mesh.visible = true;
+      // 更新空間音訊位置
+      if (p.panner) {
+        p.panner.positionX.setValueAtTime(p.pos.x, audioCtx.currentTime);
+        p.panner.positionY.setValueAtTime(p.pos.y + headHeight, audioCtx.currentTime);
+        p.panner.positionZ.setValueAtTime(p.pos.z, audioCtx.currentTime);
       }
     }
   }
 
-  listener.positionX.setValueAtTime(myPos.x, audioCtx.currentTime);
-  listener.positionY.setValueAtTime(myPos.y + headHeight, audioCtx.currentTime);
-  listener.positionZ.setValueAtTime(myPos.z, audioCtx.currentTime);
+  // 更新自己模型位置（如果要看到自己）
+  if (players[myId]) {
+    players[myId].mesh.position.copy(myPos);
+    players[myId].mesh.position.y += 12;
+  } else {
+    addPlayer(myId, myColor, [myPos.x, myPos.y, myPos.z]);
+  }
 
   broadcastState();
+
   renderer.render(scene, cam);
   requestAnimationFrame(animate);
 }
 
-connectToRoom();
-animate();
+// 啟動音訊串流並連線房間
+async function startAudioAndConnect() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch(e) {
+    console.warn('無法取得麥克風', e);
+  }
+  connectToRoom();
+}
+
+startAudioAndConnect();
+
 </script>
 </body>
 </html>
